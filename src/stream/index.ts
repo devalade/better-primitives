@@ -47,6 +47,9 @@ export function pipe(value: unknown, ...fns: Array<(value: unknown) => unknown>)
 }
 
 const streamSource: unique symbol = Symbol("better-primitives/Stream/source");
+const synchronousYieldInterval = 2_048;
+
+type StreamSource<A, E> = Iterable<Result<A, E>> | AsyncIterable<Result<A, E>>;
 
 /**
  * An opaque asynchronous stream with an explicit terminal expected-failure channel.
@@ -58,7 +61,7 @@ const streamSource: unique symbol = Symbol("better-primitives/Stream/source");
  * @template E - Expected terminal failure.
  */
 export interface Stream<A, E = never> {
-  readonly [streamSource]: (signal: AbortSignal) => AsyncIterable<Result<A, E>>;
+  readonly [streamSource]: (signal: AbortSignal) => StreamSource<A, E>;
 }
 
 /** Extracts a Stream value type. */
@@ -67,13 +70,11 @@ export type StreamValue<S> = S extends Stream<infer A, infer _E> ? A : never;
 /** Extracts a Stream expected-failure type. */
 export type StreamError<S> = S extends Stream<infer _A, infer E> ? E : never;
 
-function makeStream<A, E>(
-  source: (signal: AbortSignal) => AsyncIterable<Result<A, E>>,
-): Stream<A, E> {
+function makeStream<A, E>(source: (signal: AbortSignal) => StreamSource<A, E>): Stream<A, E> {
   return { [streamSource]: source };
 }
 
-function sourceOf<A, E>(stream: Stream<A, E>, signal: AbortSignal): AsyncIterable<Result<A, E>> {
+function sourceOf<A, E>(stream: Stream<A, E>, signal: AbortSignal): StreamSource<A, E> {
   return stream[streamSource](signal);
 }
 
@@ -87,10 +88,19 @@ function isAsyncIterable<A>(source: unknown): source is AsyncIterable<A> {
   return source != null && typeof (source as AsyncIterable<A>)[Symbol.asyncIterator] === "function";
 }
 
-type SourceIterator<A> = Iterator<A, unknown> | AsyncIterator<A, unknown>;
+function asyncIteratorOf<A>(source: Iterable<A> | AsyncIterable<A>): AsyncIterator<A> {
+  if (isAsyncIterable<A>(source)) return source[Symbol.asyncIterator]();
+  return (async function* () {
+    yield* source;
+  })();
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 function nextOrAbort<A>(
-  iterator: SourceIterator<A>,
+  iterator: AsyncIterator<A, unknown>,
   signal: AbortSignal,
 ): Promise<IteratorResult<A, unknown>> {
   if (signal.aborted) return Promise.reject(abortError(signal.reason));
@@ -132,10 +142,25 @@ export const Stream = {
    * Rejection from a raw async source remains an untyped defect boundary.
    */
   from<A>(source: AsyncIterable<A> | Iterable<A>): Stream<A, never> {
+    if (!isAsyncIterable<A>(source)) {
+      return makeStream(function* (signal) {
+        const iterator = source[Symbol.iterator]();
+        try {
+          while (true) {
+            if (signal.aborted) throw abortError(signal.reason);
+            const step = iterator.next();
+            if (signal.aborted) throw abortError(signal.reason);
+            if (step.done) return;
+            yield Result.ok(step.value);
+          }
+        } finally {
+          iterator.return?.();
+        }
+      });
+    }
+
     return makeStream(async function* (signal) {
-      const iterator: SourceIterator<A> = isAsyncIterable<A>(source)
-        ? source[Symbol.asyncIterator]()
-        : source[Symbol.iterator]();
+      const iterator = source[Symbol.asyncIterator]();
       try {
         while (true) {
           const step = await nextOrAbort(iterator, signal);
@@ -151,7 +176,7 @@ export const Stream = {
 
   /** Creates a stream that terminates with an expected failure. */
   fail<E>(error: E): Stream<never, E> {
-    return makeStream(async function* () {
+    return makeStream(function* () {
       yield Result.err(error);
     });
   },
@@ -222,14 +247,29 @@ export const Stream = {
   /** Pure synchronous map preserving the stream's expected failures. */
   map<A, B>(f: (value: A) => B): <E>(stream: Stream<A, E>) => Stream<B, E> {
     return function <E>(stream: Stream<A, E>): Stream<B, E> {
-      return makeStream(async function* (signal) {
-        for await (const item of sourceOf(stream, signal)) {
-          if (Result.isError(item)) {
-            yield Result.err<B, E>(item.error);
-            return;
-          }
-          yield Result.ok(f(item.value));
+      return makeStream((signal) => {
+        const source = sourceOf(stream, signal);
+        if (!isAsyncIterable(source)) {
+          return (function* () {
+            for (const item of source) {
+              if (Result.isError(item)) {
+                yield Result.err<B, E>(item.error);
+                return;
+              }
+              yield Result.ok(f(item.value));
+            }
+          })();
         }
+
+        return (async function* () {
+          for await (const item of source) {
+            if (Result.isError(item)) {
+              yield Result.err<B, E>(item.error);
+              return;
+            }
+            yield Result.ok(f(item.value));
+          }
+        })();
       });
     };
   },
@@ -259,14 +299,29 @@ export const Stream = {
   /** Filters values while preserving expected failures. */
   filter<A>(predicate: (value: A) => boolean): <E>(stream: Stream<A, E>) => Stream<A, E> {
     return function <E>(stream: Stream<A, E>): Stream<A, E> {
-      return makeStream(async function* (signal) {
-        for await (const item of sourceOf(stream, signal)) {
-          if (Result.isError(item)) {
-            yield item;
-            return;
-          }
-          if (predicate(item.value)) yield item;
+      return makeStream((signal) => {
+        const source = sourceOf(stream, signal);
+        if (!isAsyncIterable(source)) {
+          return (function* () {
+            for (const item of source) {
+              if (Result.isError(item)) {
+                yield item;
+                return;
+              }
+              if (predicate(item.value)) yield item;
+            }
+          })();
         }
+
+        return (async function* () {
+          for await (const item of source) {
+            if (Result.isError(item)) {
+              yield item;
+              return;
+            }
+            if (predicate(item.value)) yield item;
+          }
+        })();
       });
     };
   },
@@ -277,27 +332,55 @@ export const Stream = {
       throw new RangeError("Stream.take count must be a non-negative integer");
     }
     return (stream) =>
-      makeStream(async function* (signal) {
-        if (count === 0) return;
-        let emitted = 0;
-        for await (const item of sourceOf(stream, signal)) {
-          yield item;
-          if (Result.isError(item)) return;
-          emitted += 1;
-          if (emitted >= count) return;
+      makeStream((signal) => {
+        if (count === 0) return [];
+        const source = sourceOf(stream, signal);
+        if (!isAsyncIterable(source)) {
+          return (function* () {
+            let emitted = 0;
+            for (const item of source) {
+              yield item;
+              if (Result.isError(item)) return;
+              emitted += 1;
+              if (emitted >= count) return;
+            }
+          })();
         }
+
+        return (async function* () {
+          let emitted = 0;
+          for await (const item of source) {
+            yield item;
+            if (Result.isError(item)) return;
+            emitted += 1;
+            if (emitted >= count) return;
+          }
+        })();
       });
   },
 
   /** Observes each success value synchronously while preserving the stream. */
   tap<A>(observe: (value: A) => void): <E>(stream: Stream<A, E>) => Stream<A, E> {
     return (stream) =>
-      makeStream(async function* (signal) {
-        for await (const item of sourceOf(stream, signal)) {
-          if (Result.isOk(item)) observe(item.value);
-          yield item;
-          if (Result.isError(item)) return;
+      makeStream((signal) => {
+        const source = sourceOf(stream, signal);
+        if (!isAsyncIterable(source)) {
+          return (function* () {
+            for (const item of source) {
+              if (Result.isOk(item)) observe(item.value);
+              yield item;
+              if (Result.isError(item)) return;
+            }
+          })();
         }
+
+        return (async function* () {
+          for await (const item of source) {
+            if (Result.isOk(item)) observe(item.value);
+            yield item;
+            if (Result.isError(item)) return;
+          }
+        })();
       });
   },
 
@@ -311,7 +394,7 @@ export const Stream = {
       return makeStream(async function* (signal) {
         const controller = new AbortController();
         const unlink = linkChild(signal, controller);
-        const iterator = sourceOf(stream, controller.signal)[Symbol.asyncIterator]();
+        const iterator = asyncIteratorOf(sourceOf(stream, controller.signal));
         type TaskSettled =
           | {
               readonly kind: "task";
@@ -412,7 +495,7 @@ export const Stream = {
       return makeStream(async function* (signal) {
         const controller = new AbortController();
         const unlink = linkChild(signal, controller);
-        const iterator = sourceOf(stream, controller.signal)[Symbol.asyncIterator]();
+        const iterator = asyncIteratorOf(sourceOf(stream, controller.signal));
         type TaskSettled =
           | {
               readonly kind: "task";
@@ -520,20 +603,41 @@ export const Stream = {
   chunks(size: number): <A, E>(stream: Stream<A, E>) => Stream<ReadonlyArray<A>, E> {
     assertPositiveInteger(size, "Stream.chunks size");
     return function <A, E>(stream: Stream<A, E>): Stream<ReadonlyArray<A>, E> {
-      return makeStream(async function* (signal) {
-        let chunk: A[] = [];
-        for await (const item of sourceOf(stream, signal)) {
-          if (Result.isError(item)) {
-            yield Result.err<ReadonlyArray<A>, E>(item.error);
-            return;
-          }
-          chunk.push(item.value);
-          if (chunk.length === size) {
-            yield Result.ok<ReadonlyArray<A>, E>(chunk);
-            chunk = [];
-          }
+      return makeStream((signal) => {
+        const source = sourceOf(stream, signal);
+        if (!isAsyncIterable(source)) {
+          return (function* () {
+            let chunk: A[] = [];
+            for (const item of source) {
+              if (Result.isError(item)) {
+                yield Result.err<ReadonlyArray<A>, E>(item.error);
+                return;
+              }
+              chunk.push(item.value);
+              if (chunk.length === size) {
+                yield Result.ok<ReadonlyArray<A>, E>(chunk);
+                chunk = [];
+              }
+            }
+            if (chunk.length > 0) yield Result.ok<ReadonlyArray<A>, E>(chunk);
+          })();
         }
-        if (chunk.length > 0) yield Result.ok<ReadonlyArray<A>, E>(chunk);
+
+        return (async function* () {
+          let chunk: A[] = [];
+          for await (const item of source) {
+            if (Result.isError(item)) {
+              yield Result.err<ReadonlyArray<A>, E>(item.error);
+              return;
+            }
+            chunk.push(item.value);
+            if (chunk.length === size) {
+              yield Result.ok<ReadonlyArray<A>, E>(chunk);
+              chunk = [];
+            }
+          }
+          if (chunk.length > 0) yield Result.ok<ReadonlyArray<A>, E>(chunk);
+        })();
       });
     };
   },
@@ -548,7 +652,7 @@ export const Stream = {
       const controller = new AbortController();
       const unlink = linkChild(signal, controller);
       const iterators = streams.map((stream) =>
-        sourceOf(stream as Stream<A, E>, controller.signal)[Symbol.asyncIterator](),
+        asyncIteratorOf(sourceOf(stream as Stream<A, E>, controller.signal)),
       );
       type Settled =
         | {
@@ -599,8 +703,8 @@ export const Stream = {
     return makeStream(async function* (signal) {
       const controller = new AbortController();
       const unlink = linkChild(signal, controller);
-      const leftIterator = sourceOf(left, controller.signal)[Symbol.asyncIterator]();
-      const rightIterator = sourceOf(right, controller.signal)[Symbol.asyncIterator]();
+      const leftIterator = asyncIteratorOf(sourceOf(left, controller.signal));
+      const rightIterator = asyncIteratorOf(sourceOf(right, controller.signal));
       let pending: Array<Promise<unknown>> = [];
       try {
         while (true) {
@@ -641,9 +745,26 @@ export const Stream = {
     const unlink = linkChild(options?.signal, controller);
     const values: A[] = [];
     try {
-      for await (const item of sourceOf(stream, controller.signal)) {
-        if (Result.isError(item)) return Result.err<ReadonlyArray<A>, E | Cancelled>(item.error);
-        values.push(item.value);
+      const source = sourceOf(stream, controller.signal);
+      if (isAsyncIterable(source)) {
+        for await (const item of source) {
+          if (Result.isError(item)) return Result.err<ReadonlyArray<A>, E | Cancelled>(item.error);
+          values.push(item.value);
+        }
+      } else {
+        // Preserve the asynchronous runner boundary, then periodically let queued cancellation and
+        // other event-loop work run without paying an await for every synchronous item.
+        await Promise.resolve();
+        let valuesSinceYield = 0;
+        for (const item of source) {
+          if (Result.isError(item)) return Result.err<ReadonlyArray<A>, E | Cancelled>(item.error);
+          values.push(item.value);
+          valuesSinceYield += 1;
+          if (valuesSinceYield === synchronousYieldInterval) {
+            valuesSinceYield = 0;
+            await yieldToEventLoop();
+          }
+        }
       }
       if (controller.signal.aborted) {
         return Result.err(Cancelled.fromCause(controller.signal.reason));

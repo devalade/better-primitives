@@ -251,6 +251,107 @@ describe("Stream.buffer", () => {
 });
 
 describe("Stream composition and interop", () => {
+  it("keeps synchronous collection behind an asynchronous execution boundary", async () => {
+    let mapped = false;
+    const collecting = pipe(
+      Stream.from([1]),
+      Stream.map((value) => {
+        mapped = true;
+        return value;
+      }),
+      Stream.runCollect,
+    );
+
+    expect(mapped).toBe(false);
+    expect(await collecting).toEqual(Result.ok([1]));
+    expect(mapped).toBe(true);
+  });
+
+  it("cooperatively yields large synchronous collections for queued cancellation", async () => {
+    const controller = new AbortController();
+    let cancellationQueued = false;
+    const result = await pipe(
+      Stream.from(Array.from({ length: 5_000 }, (_, index) => index)),
+      Stream.tap(() => {
+        if (cancellationQueued) return;
+        cancellationQueued = true;
+        queueMicrotask(() => controller.abort("stop"));
+      }),
+      (stream) => Stream.runCollect(stream, { signal: controller.signal }),
+    );
+
+    expect(Result.isError(result)).toBe(true);
+    if (Result.isError(result)) expect(Cancelled.is(result.error)).toBe(true);
+  });
+
+  it("composes synchronous pure operators without changing values or observation order", async () => {
+    const observed: number[] = [];
+    const result = await pipe(
+      Stream.from([1, 2, 3, 4, 5, 6]),
+      Stream.tap((value) => observed.push(value)),
+      Stream.filter((value) => value % 2 === 0),
+      Stream.take(2),
+      Stream.chunks(2),
+      Stream.runCollect,
+    );
+
+    expect(result).toEqual(Result.ok([[2, 4]]));
+    expect(observed).toEqual([1, 2, 3, 4]);
+  });
+
+  it("runs pure maps in order and keeps thrown defects outside the typed channel", async () => {
+    const calls: string[] = [];
+    const mapped = pipe(
+      Stream.from([1, 2]),
+      Stream.map((value) => {
+        calls.push(`first:${value}`);
+        return value + 1;
+      }),
+      Stream.map((value) => {
+        calls.push(`second:${value}`);
+        return value * 2;
+      }),
+    );
+
+    expect(await Stream.runCollect(mapped)).toEqual(Result.ok([4, 6]));
+    expect(calls).toEqual(["first:1", "second:2", "first:2", "second:3"]);
+
+    const defect = new Error("pure map defect");
+    const failed = pipe(
+      Stream.from([1]),
+      Stream.map(() => {
+        throw defect;
+      }),
+    );
+    await expect(Stream.runCollect(failed)).rejects.toBe(defect);
+  });
+
+  it("checks cancellation between synchronous pulls and closes the iterator", async () => {
+    const controller = new AbortController();
+    let sourceClosed = false;
+    function* source(): Generator<number> {
+      try {
+        yield 1;
+        yield 2;
+      } finally {
+        sourceClosed = true;
+      }
+    }
+
+    const result = await pipe(
+      Stream.from(source()),
+      Stream.map((value) => {
+        controller.abort("stop");
+        return value;
+      }),
+      (stream) => Stream.runCollect(stream, { signal: controller.signal }),
+    );
+
+    expect(Result.isError(result)).toBe(true);
+    if (Result.isError(result)) expect(Cancelled.is(result.error)).toBe(true);
+    expect(sourceClosed).toBe(true);
+  });
+
   it("cancels and closes a raw async source blocked on its next pull", async () => {
     const controller = new AbortController();
     let notifyPullStarted: (() => void) | undefined;
