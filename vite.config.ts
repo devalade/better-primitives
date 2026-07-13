@@ -16,6 +16,7 @@ export default defineConfig({
       "src/index.ts",
       "src/cancel/index.ts",
       "src/time/index.ts",
+      "src/schedule/index.ts",
       "src/scope/index.ts",
       "src/task/index.ts",
       "src/resource/index.ts",

@@ -12,6 +12,9 @@ export type { Cancel as CancelType } from "./cancel/index";
 
 export { Time } from "./time/index";
 
+export { Schedule } from "./schedule/index";
+export type { Schedule as ScheduleType } from "./schedule/index";
+
 export { Scope } from "./scope/index";
 export type { Scope as ScopeType } from "./scope/index";
 

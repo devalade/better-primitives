@@ -21,6 +21,10 @@
       "types": "./dist/time/index.d.mts",
       "import": "./dist/time/index.mjs"
     },
+    "./schedule": {
+      "types": "./dist/schedule/index.d.mts",
+      "import": "./dist/schedule/index.mjs"
+    },
     "./scope": {
       "types": "./dist/scope/index.d.mts",
       "import": "./dist/scope/index.mjs"

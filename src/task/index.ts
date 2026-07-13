@@ -2,6 +2,7 @@ import { Result } from "better-result";
 import { Cancelled, abortError } from "../errors/index";
 import { linkChild, toCancelled } from "../internal/abort";
 import type { CancellableOptions } from "../options";
+import type { Schedule } from "../schedule/index";
 import type { Scope } from "../scope/index";
 
 /**
@@ -144,6 +145,26 @@ function firstSuccess<A, E>(tasks: ReadonlyArray<Task<A, E>>): Task<A, E> {
   };
 }
 
+function delay(signal: AbortSignal, ms: number): Promise<void> {
+  if (signal.aborted) return Promise.reject(abortError(signal.reason));
+  if (ms === 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      cleanup();
+      reject(abortError(signal.reason));
+    };
+    const cleanup = () => {
+      clearTimeout(id);
+      signal.removeEventListener("abort", onAbort);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /** Typed asynchronous computation constructors, combinators, and execution boundaries. */
 export const Task = {
   /** Creates a successful Task. */
@@ -236,6 +257,24 @@ export const Task = {
       }
       // SAFETY: matching the discriminant refines the selected member of the tagged error union.
       return f(result.error as Extract<E, { readonly _tag: K }>)(signal);
+    };
+  },
+
+  /** Retries expected Task failures according to a pure Schedule. Defects are not retried. */
+  retry<A, E>(task: Task<A, E>, schedule: Schedule<E>): Task<A, E> {
+    return async (signal) => {
+      let attempt = 0;
+      while (true) {
+        const result = await task(signal);
+        if (Result.isOk(result)) return result;
+        const wait = schedule.next(attempt, result.error);
+        if (wait === undefined) return result;
+        if (!Number.isFinite(wait) || wait < 0) {
+          throw new RangeError("Task.retry schedule must return a finite non-negative delay");
+        }
+        await delay(signal, wait);
+        attempt += 1;
+      }
     };
   },
 

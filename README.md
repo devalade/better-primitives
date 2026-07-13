@@ -157,6 +157,7 @@ controller.abort("no longer needed");
 | Resource | `better-primitives/resource` | Typed acquisition and deterministic release               |
 | Scope    | `better-primitives/scope`    | Structured lifetime and finalizers                        |
 | Time     | `better-primitives/time`     | Sleep, timeout, and deadline Tasks                        |
+| Schedule | `better-primitives/schedule` | Retry, backoff, limits, and jitter policies               |
 | Queue    | `better-primitives/queue`    | Backpressure queues                                       |
 | Channel  | `better-primitives/channel`  | MPSC, oneshot, broadcast, and watch channels              |
 | Sync     | `better-primitives/sync`     | Mutex, Semaphore, Deferred, Latch, and related primitives |
@@ -164,6 +165,15 @@ controller.abort("no longer needed");
 | Errors   | `better-primitives/errors`   | Cancellation, timeout, and queue error values             |
 
 `Queue.tryTake()` returns `Result<A, QueueEmptyError>`, so `undefined` remains a valid queued value.
+
+Retry expected failures with a pure schedule. Defects still reject and cancellation remains owned by
+the caller:
+
+```ts
+const result = await Task.execute(
+  Task.retry(fetchTask, Schedule.exponential(100, { maxDelay: 5_000, maxRetries: 4 })),
+);
+```
 
 The public `Fiber`, `Scope`, and synchronization contracts use `Disposable` and `AsyncDisposable`.
 TypeScript consumers that disable `skipLibCheck` should include `ESNext.Disposable` in
