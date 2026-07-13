@@ -123,6 +123,15 @@ describe("Channel", () => {
     await Promise.resolve();
     expect(await receiver.changed()).toEqual(Result.ok("ready"));
   });
+
+  it("wakes overlapping watch waiters for the same update", async () => {
+    const [sender, receiver] = Channel.watch("idle");
+    const first = receiver.changed();
+    sender.send("ready");
+    const second = receiver.changed();
+    expect(await first).toEqual(Result.ok("ready"));
+    expect(await second).toEqual(Result.ok("ready"));
+  });
 });
 
 describe("Barrier", () => {

@@ -225,6 +225,16 @@ function watch<A>(initial: A): readonly [WatchSender<A>, WatchReceiver<A>] {
     readonly signal: AbortSignal | undefined;
     onAbort: (() => void) | undefined;
   }>();
+  const resolveWaiters = () => {
+    if (waiters.size === 0 || version === observedVersion) return;
+    observedVersion = version;
+    for (const waiter of waiters) {
+      if (waiter.signal && waiter.onAbort)
+        waiter.signal.removeEventListener("abort", waiter.onAbort);
+      waiter.resolve(Result.ok(value));
+    }
+    waiters.clear();
+  };
   const sender: WatchSender<A> = {
     send(next) {
       if (closed) return;
@@ -235,13 +245,7 @@ function watch<A>(initial: A): readonly [WatchSender<A>, WatchReceiver<A>] {
         queueMicrotask(() => {
           flushScheduled = false;
           if (closed || waiters.size === 0 || version === observedVersion) return;
-          observedVersion = version;
-          for (const waiter of waiters) {
-            if (waiter.signal && waiter.onAbort)
-              waiter.signal.removeEventListener("abort", waiter.onAbort);
-            waiter.resolve(Result.ok(value));
-          }
-          waiters.clear();
+          resolveWaiters();
         });
       }
     },
@@ -268,6 +272,7 @@ function watch<A>(initial: A): readonly [WatchSender<A>, WatchReceiver<A>] {
       if (early) return Promise.resolve(Result.err(early));
       if (closed) return Promise.resolve(Result.err(QueueClosedError.instance));
       if (version > observedVersion) {
+        resolveWaiters();
         observedVersion = version;
         return Promise.resolve(Result.ok(value));
       }
