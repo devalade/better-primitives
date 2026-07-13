@@ -1,0 +1,80 @@
+{
+  "name": "better-primitives",
+  "version": "0.1.0",
+  "description": "Effect-like async primitives for TypeScript — plain Promise, AbortSignal, no effect runtime",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    },
+    "./cancel": {
+      "types": "./dist/cancel/index.d.mts",
+      "import": "./dist/cancel/index.mjs"
+    },
+    "./time": {
+      "types": "./dist/time/index.d.mts",
+      "import": "./dist/time/index.mjs"
+    },
+    "./scope": {
+      "types": "./dist/scope/index.d.mts",
+      "import": "./dist/scope/index.mjs"
+    },
+    "./task": {
+      "types": "./dist/task/index.d.mts",
+      "import": "./dist/task/index.mjs"
+    },
+    "./resource": {
+      "types": "./dist/resource/index.d.mts",
+      "import": "./dist/resource/index.mjs"
+    },
+    "./sync": {
+      "types": "./dist/sync/index.d.mts",
+      "import": "./dist/sync/index.mjs"
+    },
+    "./queue": {
+      "types": "./dist/queue/index.d.mts",
+      "import": "./dist/queue/index.mjs"
+    },
+    "./stream": {
+      "types": "./dist/stream/index.d.mts",
+      "import": "./dist/stream/index.mjs"
+    },
+    "./errors": {
+      "types": "./dist/errors/index.d.mts",
+      "import": "./dist/errors/index.mjs"
+    }
+  },
+  "scripts": {
+    "bench": "node benchmark/run.mjs",
+    "build": "vp pack",
+    "test": "vp test",
+    "check": "vp check",
+    "fmt": "vp fmt"
+  },
+  "dependencies": {
+    "better-result": "^2.9.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "effect": "3.22.0",
+    "typescript": "^5.8.3",
+    "vite-plus": "^0.2.4"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.12.0",
+      "onFail": "download"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "packageManager": "pnpm@11.12.0"
+}
