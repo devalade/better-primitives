@@ -1,5 +1,7 @@
 import { Result } from "better-result";
-import { QueueClosedError, QueueEmptyError } from "../errors/index";
+import { Cancelled, QueueClosedError, QueueEmptyError } from "../errors/index";
+import { cancelledIfAborted } from "../internal/abort";
+import type { CancellableOptions } from "../options";
 
 /**
  * Backpressure queue (Effect-like). Not an actor mailbox.
@@ -16,7 +18,7 @@ export interface Queue<A> extends AsyncIterable<A> {
    * @param value - Value to enqueue.
    * @returns False if the queue is closed.
    */
-  offer(value: A): Promise<boolean>;
+  offer(value: A, options?: CancellableOptions): Promise<boolean | Cancelled>;
   /**
    * Non-blocking offer.
    *
@@ -28,7 +30,7 @@ export interface Queue<A> extends AsyncIterable<A> {
    *
    * @returns `Err(QueueClosedError)` when closed and empty.
    */
-  take(): Promise<Result<A, QueueClosedError>>;
+  take(options?: CancellableOptions): Promise<Result<A, QueueClosedError | Cancelled>>;
   /**
    * Non-blocking take.
    *
@@ -42,12 +44,16 @@ export interface Queue<A> extends AsyncIterable<A> {
 type Strategy = "bounded" | "unbounded" | "dropping" | "sliding";
 
 type Taker<A> = {
-  resolve: (value: Result<A, QueueClosedError>) => void;
+  resolve: (value: Result<A, QueueClosedError | Cancelled>) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 };
 
 type Offerer<A> = {
   value: A;
-  resolve: (ok: boolean) => void;
+  resolve: (ok: boolean | Cancelled) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 };
 
 class QueueImpl<A> implements Queue<A> {
@@ -80,6 +86,7 @@ class QueueImpl<A> implements Queue<A> {
 
     const taker = this.#takers.shift();
     if (taker) {
+      this.#removeAbortListener(taker);
       taker.resolve(Result.ok(value));
       return true;
     }
@@ -102,8 +109,10 @@ class QueueImpl<A> implements Queue<A> {
     return false;
   }
 
-  offer(value: A): Promise<boolean> {
+  offer(value: A, options?: CancellableOptions): Promise<boolean | Cancelled> {
     if (this.#closed) return Promise.resolve(false);
+    const early = cancelledIfAborted(options?.signal);
+    if (early) return Promise.resolve(early);
 
     if (this.tryOffer(value)) {
       return Promise.resolve(true);
@@ -113,8 +122,18 @@ class QueueImpl<A> implements Queue<A> {
       return Promise.resolve(false);
     }
 
-    return new Promise<boolean>((resolve) => {
-      this.#offerers.push({ value, resolve });
+    return new Promise<boolean | Cancelled>((resolve) => {
+      const offerer: Offerer<A> = { value, resolve, signal: options?.signal };
+      const onAbort = () => {
+        const index = this.#offerers.indexOf(offerer);
+        if (index >= 0) {
+          this.#offerers.splice(index, 1);
+          resolve(Cancelled.fromCause(options?.signal?.reason));
+        }
+      };
+      offerer.onAbort = onAbort;
+      this.#offerers.push(offerer);
+      options?.signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 
@@ -126,16 +145,27 @@ class QueueImpl<A> implements Queue<A> {
     return Result.ok(value as A);
   }
 
-  take(): Promise<Result<A, QueueClosedError>> {
+  take(options?: CancellableOptions): Promise<Result<A, QueueClosedError | Cancelled>> {
+    const early = cancelledIfAborted(options?.signal);
+    if (early) return Promise.resolve(Result.err(early));
     const value = this.tryTake();
     if (Result.isOk(value)) return Promise.resolve(value);
 
     if (this.#closed) {
       return Promise.resolve(Result.err(QueueClosedError.instance));
     }
-
     return new Promise((resolve) => {
-      this.#takers.push({ resolve });
+      const taker: Taker<A> = { resolve, signal: options?.signal };
+      const onAbort = () => {
+        const index = this.#takers.indexOf(taker);
+        if (index >= 0) {
+          this.#takers.splice(index, 1);
+          resolve(Result.err(Cancelled.fromCause(options?.signal?.reason)));
+        }
+      };
+      taker.onAbort = onAbort;
+      this.#takers.push(taker);
+      options?.signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 
@@ -144,9 +174,11 @@ class QueueImpl<A> implements Queue<A> {
     this.#closed = true;
 
     for (const offerer of this.#offerers.splice(0)) {
+      this.#removeAbortListener(offerer);
       offerer.resolve(false);
     }
     for (const taker of this.#takers.splice(0)) {
+      this.#removeAbortListener(taker);
       taker.resolve(Result.err(QueueClosedError.instance));
     }
   }
@@ -155,9 +187,17 @@ class QueueImpl<A> implements Queue<A> {
     while (this.#offerers.length > 0 && this.#buffer.length < this.#capacity) {
       const offerer = this.#offerers.shift();
       if (!offerer) return;
+      this.#removeAbortListener(offerer);
       this.#buffer.push(offerer.value);
       offerer.resolve(true);
     }
+  }
+
+  #removeAbortListener(waiter: {
+    readonly signal?: AbortSignal;
+    readonly onAbort?: () => void;
+  }): void {
+    if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<A> {

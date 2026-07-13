@@ -1,6 +1,6 @@
 import { Result } from "better-result";
 import { describe, expect, it } from "vite-plus/test";
-import { QueueClosedError, QueueEmptyError } from "../errors/index";
+import { Cancelled, QueueClosedError, QueueEmptyError } from "../errors/index";
 import { Stream, pipe } from "../stream/index";
 import { Task } from "../task/index";
 import { Time } from "../time/index";
@@ -76,6 +76,25 @@ describe("Queue", () => {
 
     q.tryOffer(undefined);
     expect(q.tryTake()).toEqual(Result.ok(undefined));
+  });
+
+  it("cancels pending takes and offers without leaking waiters", async () => {
+    const q = Queue.bounded<number>(1);
+    const takeController = new AbortController();
+    const take = q.take({ signal: takeController.signal });
+    takeController.abort("stop taking");
+    const takeResult = await take;
+    expect(Result.isError(takeResult)).toBe(true);
+    if (Result.isError(takeResult)) expect(Cancelled.is(takeResult.error)).toBe(true);
+
+    await q.offer(1);
+    const offerController = new AbortController();
+    const offer = q.offer(2, { signal: offerController.signal });
+    offerController.abort("stop offering");
+    const offerResult = await offer;
+    expect(Cancelled.is(offerResult)).toBe(true);
+    expect(await q.take()).toEqual(Result.ok(1));
+    expect(await q.offer(2)).toBe(true);
   });
 });
 

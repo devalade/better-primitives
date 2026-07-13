@@ -343,6 +343,49 @@ export class Latch {
   }
 }
 
+/** Reusable barrier that releases all waiters when `parties` arrivals occur. */
+export class Barrier {
+  #remaining: number;
+  #generation = 0;
+  readonly #waiters = new Map<number, Array<() => void>>();
+
+  constructor(private readonly parties: number) {
+    if (!Number.isInteger(parties) || parties < 1) {
+      throw new RangeError("Barrier parties must be a positive integer");
+    }
+    this.#remaining = parties;
+  }
+
+  async wait(options?: CancellableOptions): Promise<Result<void, Cancelled>> {
+    const early = cancelledIfAborted(options?.signal);
+    if (early) return Result.err(early);
+    const generation = this.#generation;
+    this.#remaining -= 1;
+    if (this.#remaining === 0) {
+      this.#generation += 1;
+      this.#remaining = this.parties;
+      for (const resolve of this.#waiters.get(generation) ?? []) resolve();
+      this.#waiters.delete(generation);
+      return Result.ok(undefined);
+    }
+    return new Promise((resolve) => {
+      const waiters = this.#waiters.get(generation) ?? [];
+      const wake = () => {
+        options?.signal?.removeEventListener("abort", onAbort);
+        resolve(Result.ok(undefined));
+      };
+      const onAbort = () => {
+        const index = waiters.indexOf(wake);
+        if (index >= 0) waiters.splice(index, 1);
+        resolve(Result.err(Cancelled.fromCause(options?.signal?.reason)));
+      };
+      waiters.push(wake);
+      this.#waiters.set(generation, waiters);
+      options?.signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+}
+
 /**
  * Simple condition variable: wait / notify one / notify all.
  */

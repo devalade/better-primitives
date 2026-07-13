@@ -21,6 +21,7 @@ export default defineConfig({
       "src/resource/index.ts",
       "src/sync/index.ts",
       "src/queue/index.ts",
+      "src/channel/index.ts",
       "src/stream/index.ts",
       "src/errors/index.ts",
     ],

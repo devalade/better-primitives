@@ -158,6 +158,7 @@ controller.abort("no longer needed");
 | Scope    | `better-primitives/scope`    | Structured lifetime and finalizers                        |
 | Time     | `better-primitives/time`     | Sleep, timeout, and deadline Tasks                        |
 | Queue    | `better-primitives/queue`    | Backpressure queues                                       |
+| Channel  | `better-primitives/channel`  | MPSC, oneshot, broadcast, and watch channels              |
 | Sync     | `better-primitives/sync`     | Mutex, Semaphore, Deferred, Latch, and related primitives |
 | Cancel   | `better-primitives/cancel`   | AbortSignal trees                                         |
 | Errors   | `better-primitives/errors`   | Cancellation, timeout, and queue error values             |

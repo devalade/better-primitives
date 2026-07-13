@@ -41,6 +41,10 @@
       "types": "./dist/queue/index.d.mts",
       "import": "./dist/queue/index.mjs"
     },
+    "./channel": {
+      "types": "./dist/channel/index.d.mts",
+      "import": "./dist/channel/index.mjs"
+    },
     "./stream": {
       "types": "./dist/stream/index.d.mts",
       "import": "./dist/stream/index.mjs"
