@@ -4,6 +4,8 @@
  */
 export type Schedule<E = unknown> = {
   readonly next: (attempt: number, error: E) => number | undefined;
+  /** Optional hard ceiling used by schedule decorators such as jitter. */
+  readonly maxDelay?: number;
 };
 
 type RetryOptions = {
@@ -33,6 +35,7 @@ export const Schedule = {
   immediate<E = unknown>(options?: RetryOptions): Schedule<E> {
     const maxRetries = retries(options);
     return {
+      maxDelay: 0,
       next: (attempt) => (attempt < maxRetries ? 0 : undefined),
     };
   },
@@ -60,6 +63,7 @@ export const Schedule = {
     if (maxDelay !== Number.POSITIVE_INFINITY) assertDelay(maxDelay);
     const maxRetries = retries(options);
     return {
+      ...(Number.isFinite(maxDelay) ? { maxDelay } : {}),
       next: (attempt) => {
         if (attempt >= maxRetries) return undefined;
         const calculated = initialDelay * factor ** attempt;
@@ -75,6 +79,7 @@ export const Schedule = {
   limit<E>(schedule: Schedule<E>, maxRetries: number): Schedule<E> {
     const limit = retries({ maxRetries });
     return {
+      ...(schedule.maxDelay === undefined ? {} : { maxDelay: schedule.maxDelay }),
       next: (attempt, error) => (attempt < limit ? schedule.next(attempt, error) : undefined),
     };
   },
@@ -85,6 +90,7 @@ export const Schedule = {
       throw new RangeError("Schedule jitter amount must be between 0 and 1");
     }
     return {
+      ...(schedule.maxDelay === undefined ? {} : { maxDelay: schedule.maxDelay }),
       next: (attempt, error) => {
         const delay = schedule.next(attempt, error);
         if (delay === undefined || amount === 0) return delay;
@@ -92,7 +98,8 @@ export const Schedule = {
         if (!Number.isFinite(sample) || sample < 0 || sample > 1) {
           throw new RangeError("Schedule random source must return a number between 0 and 1");
         }
-        return delay * (1 - amount + sample * 2 * amount);
+        const jittered = delay * (1 - amount + sample * 2 * amount);
+        return schedule.maxDelay === undefined ? jittered : Math.min(schedule.maxDelay, jittered);
       },
     };
   },

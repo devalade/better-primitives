@@ -78,6 +78,7 @@ export interface OneshotSender<A> {
 export interface OneshotReceiver<A> {
   readonly isClosed: boolean;
   recv(options?: CancellableOptions): Promise<ChannelResult<A>>;
+  close(): void;
 }
 
 /** Creates a single-value channel. */
@@ -109,12 +110,17 @@ function oneshot<A>(): readonly [OneshotSender<A>, OneshotReceiver<A>] {
         return result;
       });
     },
+    close() {
+      received = true;
+      queue.close();
+    },
   };
   return [sender, receiver];
 }
 
 export interface BroadcastSender<A> {
   readonly isClosed: boolean;
+  /** Returns false when closed or any receiver buffer is full. */
   send(value: A): boolean;
   subscribe(): BroadcastReceiver<A>;
   close(): void;
@@ -127,7 +133,10 @@ export interface BroadcastReceiver<A> extends AsyncIterable<A> {
 }
 
 class BroadcastReceiverImpl<A> implements BroadcastReceiver<A> {
-  constructor(readonly queue: Queue<A>) {}
+  constructor(
+    readonly queue: Queue<A>,
+    private readonly onClose: () => void,
+  ) {}
 
   get isClosed(): boolean {
     return this.queue.isClosed;
@@ -138,7 +147,9 @@ class BroadcastReceiverImpl<A> implements BroadcastReceiver<A> {
   }
 
   close(): void {
+    if (this.queue.isClosed) return;
     this.queue.close();
+    this.onClose();
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<A> {
@@ -158,7 +169,10 @@ function broadcast<A>(capacity: number): readonly [BroadcastSender<A>, Broadcast
   const receivers = new Set<BroadcastReceiverImpl<A>>();
   let closed = false;
   const createReceiver = () => {
-    const receiver = new BroadcastReceiverImpl(Queue.bounded<A>(capacity));
+    let receiver: BroadcastReceiverImpl<A>;
+    receiver = new BroadcastReceiverImpl(Queue.bounded<A>(capacity), () => {
+      receivers.delete(receiver);
+    });
     receivers.add(receiver);
     return receiver;
   };
@@ -205,6 +219,7 @@ function watch<A>(initial: A): readonly [WatchSender<A>, WatchReceiver<A>] {
   let version = 0;
   let observedVersion = 0;
   let closed = false;
+  let flushScheduled = false;
   const waiters = new Set<{
     readonly resolve: (result: Result<A, QueueClosedError | Cancelled>) => void;
     readonly signal: AbortSignal | undefined;
@@ -215,13 +230,20 @@ function watch<A>(initial: A): readonly [WatchSender<A>, WatchReceiver<A>] {
       if (closed) return;
       value = next;
       version += 1;
-      for (const waiter of waiters) {
-        if (waiter.signal && waiter.onAbort)
-          waiter.signal.removeEventListener("abort", waiter.onAbort);
-        observedVersion = version;
-        waiter.resolve(Result.ok(value));
+      if (waiters.size > 0 && !flushScheduled) {
+        flushScheduled = true;
+        queueMicrotask(() => {
+          flushScheduled = false;
+          if (closed || waiters.size === 0 || version === observedVersion) return;
+          observedVersion = version;
+          for (const waiter of waiters) {
+            if (waiter.signal && waiter.onAbort)
+              waiter.signal.removeEventListener("abort", waiter.onAbort);
+            waiter.resolve(Result.ok(value));
+          }
+          waiters.clear();
+        });
       }
-      waiters.clear();
     },
     close() {
       if (closed) return;
